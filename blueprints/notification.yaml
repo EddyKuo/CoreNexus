@@ -1,0 +1,53 @@
+# ==========================================
+# 📦 Blueprint Definition: Notification
+# ==========================================
+# 這份 YAML 檔是 Meta-System 生成引擎的藍圖配置 (Blueprint)。
+# 系統啟動時，API 路由 (Router)、Pydantic DTO 與 SQLAlchemy ORM 將會基於此檔案自動生成。
+# 
+# 📝 【基礎設定】
+# - model_name: 系統內部的模型名稱 (必須是 PascalCase，對應 Python Class)
+# - table_name: 實際在資料庫底層建立的資料表名稱 (必須是 snake_case)
+# - description: 顯示於 Swagger UI (http://localhost:8000/docs) 的模組說明
+# - auth_required: 是否強制此 API 路由需要身份驗證 (JWT / Token) 才能存取
+#
+# 🗄️ 【欄位設定 (fields)】
+# 定義資料表的各個欄位屬性。
+# - name: 欄位名稱 (snake_case)
+# - type: 資料型別 (支援: uuid, string, integer, float, boolean, datetime, text, json)
+# - primary_key: true 代表此為主鍵 (強烈建議搭配 type: uuid 與 default: uuid4)
+# - nullable: true 代表允許為空值 (NULL)
+# - default: 預設值 (支援內建函數如 'uuid4', 'now'，或自訂靜態值如 0, false, 'pending')
+# - index: true 代表建立資料庫索引，以加速該欄位的查詢速度
+# - unique: true 代表設定唯一約束，不可重複 (如 Email 或身分證字號)
+# - length: 針對 string 型別限定的最大字元長度 (例如 255)
+# ------------------------------------------
+model_name: Notification
+table_name: notifications
+description: User Notifications
+auth_required: true
+fields:
+- name: id
+  type: uuid
+  primary_key: true
+  nullable: false
+  default: uuid4
+- name: user_id
+  type: uuid
+  nullable: false
+  index: true
+- name: title
+  type: string
+  length: 150
+  nullable: false
+- name: message
+  type: text
+  nullable: false
+- name: is_read
+  type: boolean
+  nullable: false
+  default: false
+- name: created_at
+  type: datetime
+  nullable: false
+  default: now
+relations: []
