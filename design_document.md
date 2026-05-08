@@ -2,12 +2,14 @@
 
 ---
 document_type: DesignDocument
-version: 1.0.0
-status: draft
+version: 1.1.0
+status: active
 author_agents: [PM, SA, CodeReviewer, Orchestrator]
 date: 2026-05-08
+last_updated: 2026-05-08
 project: CoreNexus
 sprint: 1
+sprint_1_status: COMPLETE
 ---
 
 ---
@@ -106,10 +108,10 @@ flowchart TD
 | `orm_factory.py` | Dynamic ORM class generation | `type()` metaclass; `_class_registry` cache check |
 | `dto_factory.py` | Dynamic Pydantic DTO generation | `create_model`; three-DTO pattern (Create/Update/Response) |
 | `parser.py` | YAML blueprint loading | `yaml.safe_load`; Fail-Fast via `SystemExit` |
-| `repository.py` | Generic async CRUD | Generic `CRUDBase[M, C, U]`; hardcoded `.id` PK lookup |
-| `router_builder.py` | Dynamic FastAPI router | `exec()` for POST/PUT type-annotated handlers |
+| `repository.py` | Generic async CRUD | Generic `CRUDBase[M, C, U]`; generic PK via `sa_inspect` ✅ |
+| `router_builder.py` | Dynamic FastAPI router | Closure factories for POST/PUT/PATCH handlers ✅ |
 | `query_builder.py` | Magic filter protocol | Django-style `__gte`/`__icontains` operators |
-| `auth.py` | JWT issue + verify | python-jose + bcrypt; hardcoded `SECRET_KEY` |
+| `auth.py` | JWT issue + verify | python-jose + bcrypt; SECRET_KEY from env var ✅ |
 | `database.py` | Async engine + session | `create_async_engine` with pool tuning |
 | `main.py` | App + lifespan + auth endpoints | `_RegDTO` inline model; `app.state` for ORM |
 | `cli.py` | Migration CLI | Typer; regex-based Safe-Mode scan |
@@ -140,81 +142,69 @@ flowchart TD
 
 ### 3.2 What Is Missing or Incomplete
 
-| Gap | Severity | Details |
-|---|---|---|
-| `SECRET_KEY` from environment | Critical | Hardcoded in `auth.py:18` |
-| PATCH endpoint | High | Only PUT exists; partial updates require full payload |
-| `datetime.utcnow()` usage | High | Deprecated in Python 3.12+; two call sites in `auth.py` |
-| CORS configuration | Medium | No `CORSMiddleware` in `main.py` |
-| Rate limiting | Low | No middleware or decorator present |
-| Refresh token | Low | Access-only token issuance; no rotation |
-| Error response format | Medium | `IntegrityError` handler uses non-standard shape |
+| Gap | Severity | Status | Details |
+|---|---|---|---|
+| `SECRET_KEY` from environment | Critical | ✅ Fixed (Sprint 1) | Loaded via `os.getenv`; `ValueError` on missing |
+| PATCH endpoint | High | ✅ Fixed (Sprint 1) | `PATCH /{id}` added to all generated routers |
+| `datetime.utcnow()` usage | High | ✅ Fixed (Sprint 1) | Replaced with `datetime.now(timezone.utc)` |
+| Generic PK lookup in repository | High | ✅ Fixed (Sprint 1) | `sa_inspect` used; no longer assumes column named `id` |
+| YAML/JSON docs mismatch | High | ✅ Fixed (Sprint 1) | CLAUDE.md + README updated to say YAML |
+| CORS configuration | Medium | ⏳ Sprint 2 | No `CORSMiddleware` in `main.py` |
+| Error response format | Medium | ⏳ Sprint 2 | `IntegrityError` handler uses non-standard shape |
+| Rate limiting | Low | ⏳ Sprint 3 | No middleware or decorator present |
+| Refresh token | Low | ⏳ Sprint 3 | Access-only token issuance; no rotation |
 
 ---
 
 ## 4. Identified Issues & Improvement Areas
 
-### 4.1 Critical (Security)
+### 4.1 Critical (Security) — ✅ All resolved in Sprint 1
 
-#### CRIT-1 — Hardcoded JWT Secret Key
-**Location:** `src/core/auth.py:18`
-```python
-SECRET_KEY = "super-secret-meta-system-key"
-```
-**Risk:** Anyone with access to the repository (including git history) can forge valid JWT tokens for any user. This completely bypasses authentication.
-**Fix:** Load from `os.getenv("SECRET_KEY")` and raise `ValueError` at startup if unset. Minimum 32 bytes of random entropy (use `secrets.token_hex(32)`).
+#### CRIT-1 — Hardcoded JWT Secret Key — ✅ Resolved in Sprint 1
+**Location:** `src/core/auth.py`
+**Was:** `SECRET_KEY = "super-secret-meta-system-key"` (hardcoded string literal)
+**Risk:** Anyone with repository access (including git history) can forge valid JWT tokens for any user, completely bypassing authentication.
+**Fix applied:** `_load_secret_key()` reads from `os.getenv("SECRET_KEY")`; raises `ValueError` at module import time if unset. See `.env.example` for setup instructions and ADR-001.
 
-#### CRIT-2 — `exec()` for Route Handler Registration
-**Location:** `src/core/router_builder.py:43-56` (POST handler) and `110-128` (PUT handler)
-```python
-exec(
-    f"""
-async def _create(item: __CreateDTO, db: AsyncSession = Depends(__get_db)):
-    return await __crud.create(db=db, obj_in=item)
-""",
-    {"__CreateDTO": CreateDTO, ...},
-    _ns := {},
-)
-```
-**Risk:** No user-controlled input reaches the `exec()` call today (only `CreateDTO` class references are injected). However, the pattern is difficult to audit, breaks debugger step-through, produces anonymous stack frames in tracebacks, and creates a maintenance hazard if someone later passes user-influenced data into the f-string template. The root problem it solves (FastAPI needs the type annotation at function definition time) has a clean solution via closure factories.
-**Fix:** Replace with a closure factory function (see Section 6).
+#### CRIT-2 — `exec()` for Route Handler Registration — ✅ Resolved in Sprint 1
+**Location:** `src/core/router_builder.py`
+**Was:** Two `exec()` blocks used to define POST and PUT handlers with correct type annotations.
+**Risk:** Difficult to audit; breaks debugger step-through; produces anonymous stack frames in tracebacks; maintenance hazard if user-influenced data ever reached the f-string template.
+**Fix applied:** Replaced with `_make_create_handler()`, `_make_update_handler()`, and `_make_patch_handler()` closure factories that mutate `__annotations__["item"]` after definition. See ADR-003.
 
 ---
 
-### 4.2 High (Correctness / API Design)
+### 4.2 High (Correctness / API Design) — ✅ All resolved in Sprint 1
 
-#### HIGH-1 — Hardcoded `.id` Primary Key in Repository
-**Location:** `src/core/repository.py:28`
-```python
-result = await db.execute(select(self.model).where(self.model.id == id_val))
-```
-**Risk:** Any blueprint that names its PK something other than `id` (e.g., `user_id`, `pk`, `code`) will produce an `AttributeError` at runtime. The `ModelSchema` validator only requires that *some* field has `primary_key: True`, not that it is named `id`.
-**Fix:** Inspect `self.model.__table__.primary_key` to find the actual PK column(s) at `CRUDBase.__init__` time and store the column reference. See ADR-004.
+#### HIGH-1 — Hardcoded `.id` Primary Key in Repository — ✅ Resolved in Sprint 1
+**Location:** `src/core/repository.py`
+**Was:** `self.model.id == id_val` — assumes every model has a column named `id`.
+**Risk:** Any blueprint naming its PK something other than `id` (e.g., `code`, `pk`) produces `AttributeError` at runtime.
+**Fix applied:** `CRUDBase.__init__` now uses `sa_inspect(model).mapper.primary_key` to resolve the actual PK column and stores `self._pk_attr` + `self._pk_is_uuid`. Raises `ValueError` on composite PKs. See ADR-004.
 
-#### HIGH-2 — No PATCH Endpoint
-**Location:** `src/core/router_builder.py` — absence
-**Risk:** Clients performing partial updates (e.g., updating only a user's email) must send the entire resource representation on a PUT. This breaks REST semantics and creates bandwidth waste; more critically, nullable fields not sent by the client get overwritten with `None` because `UpdateDTO` makes all fields `Optional` with `default=None`.
-**Fix:** Add a `PATCH /{id}` route using the same `UpdateDTO` (already all-optional) and call `crud.update()` which already uses `exclude_unset=True`.
+#### HIGH-2 — No PATCH Endpoint — ✅ Resolved in Sprint 1
+**Location:** `src/core/router_builder.py`
+**Was:** Only `PUT /{id}` existed; partial updates required sending the full resource.
+**Risk:** Nullable fields not included in the PUT payload are overwritten with `None`.
+**Fix applied:** `PATCH /{id}` added via `_make_patch_handler()`. Uses the same all-optional `UpdateDTO` and `crud.update()` with `exclude_unset=True`, giving correct partial-update semantics automatically.
 
-#### HIGH-3 — `datetime.utcnow()` Deprecated
-**Location:** `src/core/auth.py:27,30`
-```python
-expire = datetime.utcnow() + expires_delta
-expire = datetime.utcnow() + timedelta(minutes=15)
-```
-**Risk:** Python 3.12 emits `DeprecationWarning` on every token issuance. Python 3.14 will remove `utcnow()`. Aware datetimes also prevent subtle DST-related token expiry bugs.
-**Fix:** Replace with `datetime.now(timezone.utc)`. Requires `from datetime import timezone`.
+#### HIGH-3 — `datetime.utcnow()` Deprecated — ✅ Resolved in Sprint 1
+**Location:** `src/core/auth.py`
+**Was:** `datetime.utcnow()` called on every token issuance.
+**Risk:** `DeprecationWarning` in Python 3.12; `utcnow()` removed in Python 3.14.
+**Fix applied:** Replaced with `datetime.now(timezone.utc)` throughout `auth.py`.
 
-#### HIGH-4 — Blueprint Format Mismatch (Docs vs. Code)
-**Locations:** `CLAUDE.md` ("JSON Schema Blueprints"), `README.md` ("JSON Blueprints"), vs. `parser.py:22` (`glob("*.yaml")`), `parser.py:41` (`yaml.safe_load`)
-**Risk:** New contributors following the documentation will create `.json` files that are silently ignored by the parser, then spend time debugging a non-obvious `SystemExit: No YAML blueprint files found` error.
-**Fix:** Per ADR-002, keep YAML (it is more human-readable and already the entire `blueprints/` directory uses `.yaml`). Update `CLAUDE.md` and `README.md` to say "YAML blueprints".
+#### HIGH-4 — Blueprint Format Mismatch (Docs vs. Code) — ✅ Resolved in Sprint 1
+**Locations:** `CLAUDE.md`, `README.md`
+**Was:** Documentation said "JSON Schema Blueprints"; parser actually reads `.yaml` files.
+**Risk:** Contributors create `.json` files that are silently ignored, causing a confusing startup error.
+**Fix applied:** All documentation updated to say "YAML blueprints". See ADR-002.
 
 ---
 
-### 4.3 Medium (Architecture / Maintainability)
+### 4.3 Medium (Architecture / Maintainability) — ⏳ Targeted in Sprint 2
 
-#### MED-1 — Non-Standard Error Response Shape
+#### MED-1 — Non-Standard Error Response Shape — ⏳ Sprint 2
 **Location:** `src/main.py:80-83`
 ```python
 content={"error": "Resource Conflict", "detail": "A unique constraint..."}
@@ -226,7 +216,7 @@ content={"error": "Resource Conflict", "detail": "A unique constraint..."}
 The `404` responses from `router_builder.py` also use FastAPI's default `{"detail": "..."}` shape. Clients parsing error responses need to handle two distinct schemas.
 **Fix:** Add a custom `HTTPException` handler and a standardized error factory function. Wrap all `raise HTTPException(...)` calls to emit `ERR_{DOMAIN}_{REASON}` codes.
 
-#### MED-2 — `_RegDTO` Inline Pydantic Model
+#### MED-2 — `_RegDTO` Inline Pydantic Model — ⏳ Sprint 2
 **Location:** `src/main.py:105-113`
 ```python
 @app.post("/api/v1/auth/register", ...)
@@ -240,7 +230,7 @@ async def register(body: RegisterRequest, db=Depends(get_db)):
 **Risk:** A Pydantic model defined inside a request handler is re-created on every request (minor perf), is invisible to OpenAPI schema generation, and cannot be reused by tests or other handlers.
 **Fix:** Extract `_RegDTO` to a module-level class, or — better — pass the data dict directly to `user_crud.create()` since `CRUDBase.create()` already handles plain dicts via `hasattr(obj_in, "model_dump")`.
 
-#### MED-3 — Untyped `app.state` Access
+#### MED-3 — Untyped `app.state` Access — ⏳ Sprint 2
 **Location:** `src/main.py:58-60, 99, 103, 121`
 ```python
 app.state.user_orm = orm_models["User"]
@@ -251,7 +241,7 @@ user_crud = getattr(app.state, "user_crud", None)
 **Risk:** Typo-prone; no IDE autocomplete; silent `None` if the `User` blueprint does not exist. The `503` response is correct behavior, but the check pattern is repeated and fragile.
 **Fix:** Use a typed `AppState` Pydantic model or typed `dataclass` and assign it to `app.state` in lifespan. Alternatively, use `request.app.state` with explicit Optional typing via a `TypedDict`.
 
-#### MED-4 — `Base.registry._class_registry` Private API Access
+#### MED-4 — `Base.registry._class_registry` Private API Access — ⏳ Sprint 2
 **Location:** `src/core/orm_factory.py:72`
 ```python
 existing = Base.registry._class_registry.get(schema.model_name)
@@ -261,23 +251,23 @@ existing = Base.registry._class_registry.get(schema.model_name)
 
 ---
 
-### 4.4 Low (Production Readiness)
+### 4.4 Low (Production Readiness) — ⏳ Targeted in Sprint 3
 
-#### LOW-1 — No CORS Configuration
+#### LOW-1 — No CORS Configuration — ⏳ Sprint 3
 **Location:** `src/main.py` — absence
 **Risk:** Cross-origin requests will be blocked by browsers by default (no `Access-Control-Allow-Origin` header). For any browser-based frontend, this is a total blocker.
 **Fix:** Add `CORSMiddleware` with an explicit allowlist from environment variable. Default to `["http://localhost:3000"]` in development.
 
-#### LOW-2 — No Rate Limiting
+#### LOW-2 — No Rate Limiting — ⏳ Sprint 3
 **Risk:** Public endpoints (`/api/v1/auth/token`, `/api/v1/auth/register`) are open to credential stuffing and brute force. `CLAUDE.md` Section 11 mandates 100 req/min/IP.
 **Fix:** Add `slowapi` (built on `limits`) or a reverse-proxy-level rule (nginx `limit_req`). Document the chosen approach.
 
-#### LOW-3 — No Refresh Token
+#### LOW-3 — No Refresh Token — ⏳ Sprint 3
 **Location:** `src/core/auth.py`, `src/main.py` — absence
 **Risk:** Access tokens expire after 30 minutes and users must re-authenticate. `CLAUDE.md` Section 11 requires Refresh Token Rotation.
 **Fix:** Add a `POST /api/v1/auth/refresh` endpoint. Store refresh tokens in a dedicated table (or Redis) with single-use enforcement.
 
-#### LOW-4 — No `requirements-dev.txt` Separation
+#### LOW-4 — No `requirements-dev.txt` Separation — ⏳ Sprint 3
 **Location:** `requirements.txt:15-19`
 **Risk:** `pytest`, `httpx`, and `python-multipart` are bundled with production dependencies. Docker builds for production install test tooling unnecessarily.
 **Fix:** Split into `requirements.txt` (prod) and `requirements-dev.txt` (test/lint). Update Dockerfile to use only prod deps.
@@ -290,102 +280,36 @@ The following ADRs have been created under `.claude/.decisions/`:
 
 | ADR | Topic | Status |
 |---|---|---|
-| ADR-001 | Secret management — env var vs. hardcoded | Accepted |
-| ADR-002 | Blueprint format — YAML vs. JSON | Accepted |
-| ADR-003 | Dynamic routing — `exec()` vs. closure factory | Accepted |
-| ADR-004 | Primary key abstraction — hardcoded `.id` vs. generic PK lookup | Accepted |
+| ADR-001 | Secret management — env var vs. hardcoded | ✅ Accepted & Implemented |
+| ADR-002 | Blueprint format — YAML vs. JSON | ✅ Accepted & Implemented |
+| ADR-003 | Dynamic routing — `exec()` vs. closure factory | ✅ Accepted & Implemented |
+| ADR-004 | Primary key abstraction — hardcoded `.id` vs. generic PK lookup | ✅ Accepted & Implemented |
 
 ---
 
 ## 6. Proposed Improvements (Concrete Recommendations)
 
-### 6.1 Fix CRIT-1: Secret Key from Environment
+### 6.1 Fix CRIT-1: Secret Key from Environment — ✅ Implemented in Sprint 1
 
-```python
-# src/core/auth.py
-import os
+`src/core/auth.py` now exposes `_load_secret_key()` which reads `os.getenv("SECRET_KEY")` and raises `ValueError` at module import time if the value is absent or empty. The server refuses to start rather than running in an insecure state. See `.env.example` for setup instructions.
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-if not SECRET_KEY:
-    raise ValueError(
-        "SECRET_KEY environment variable is not set. "
-        "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
-    )
-```
+### 6.2 Fix CRIT-2: Replace `exec()` with Closure Factory — ✅ Implemented in Sprint 1
 
-Add `SECRET_KEY=<value>` to `.env` (already in `.gitignore` via `python-dotenv`). Use `pydantic-settings` `BaseSettings` for a typed config object.
+`src/core/router_builder.py` now uses `_make_create_handler()`, `_make_update_handler()`, and `_make_patch_handler()` closure factories. Each defines an `async def` and then mutates `__annotations__["item"]` to inject the runtime-generated DTO type, giving FastAPI the correct annotation without `exec()`.
 
-### 6.2 Fix CRIT-2: Replace `exec()` with Closure Factory
+### 6.3 Fix HIGH-1: Generic PK Lookup — ✅ Implemented in Sprint 1
 
-```python
-# router_builder.py — closure factory pattern
-def _make_create_handler(CreateDTO, get_db, crud):
-    async def _create(
-        item: CreateDTO,
-        db: AsyncSession = Depends(get_db),
-    ):
-        return await crud.create(db=db, obj_in=item)
-    # Patch the annotation so FastAPI sees the concrete type
-    _create.__annotations__["item"] = CreateDTO
-    return _create
-```
+`CRUDBase.__init__` now calls `sa_inspect(model).mapper.primary_key` to resolve the actual PK column at construction time, storing `self._pk_col`, `self._pk_attr`, and `self._pk_is_uuid`. UUID coercion in `get()` is type-driven (checks `SAUuid`/`PGUUID`) rather than relying on the length-36 string heuristic.
 
-This gives FastAPI the correct type annotation at registration time without `exec()`, preserves debuggability, and survives static analysis.
+### 6.4 Fix HIGH-2: Add PATCH Endpoint — ✅ Implemented in Sprint 1
 
-### 6.3 Fix HIGH-1: Generic PK Lookup
+`create_crud_router()` now registers `PATCH /{id}` via `_make_patch_handler()`. Because `UpdateDTO` already marks every field `Optional` with `default=None`, and `CRUDBase.update()` uses `exclude_unset=True`, PATCH semantics are correct automatically — only fields present in the request body are updated.
 
-```python
-# src/core/repository.py
-class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
-    def __init__(self, model: Type[ModelType]) -> None:
-        self.model = model
-        # Resolve PK column at construction time
-        pk_cols = list(model.__table__.primary_key.columns)
-        if len(pk_cols) != 1:
-            raise ValueError(f"{model.__name__} must have exactly one PK column")
-        self._pk_col = pk_cols[0]
-        self._pk_attr = getattr(model, self._pk_col.name)
+### 6.5 Fix HIGH-3: Timezone-Aware Datetimes — ✅ Implemented in Sprint 1
 
-    async def get(self, db: AsyncSession, id: Any) -> ModelType | None:
-        result = await db.execute(
-            select(self.model).where(self._pk_attr == id)
-        )
-        return result.scalar_one_or_none()
-```
+Both `datetime.utcnow()` calls in `src/core/auth.py` replaced with `datetime.now(timezone.utc)`. Import updated to `from datetime import datetime, timedelta, timezone`.
 
-### 6.4 Fix HIGH-2: Add PATCH Endpoint
-
-In `router_builder.py`, after the PUT route registration, add:
-
-```python
-exec(
-    # OR use closure factory pattern from 6.2
-    ...
-)
-router.add_api_route(
-    "/{id}",
-    _ns_patch["_patch"],
-    methods=["PATCH"],
-    response_model=ResponseDTO,
-    dependencies=dependencies,
-    summary=f"Partially update a {schema.model_name}",
-)
-```
-
-`CRUDBase.update()` already uses `exclude_unset=True`, making it correct for PATCH semantics.
-
-### 6.5 Fix HIGH-3: Timezone-Aware Datetimes
-
-```python
-# src/core/auth.py
-from datetime import datetime, timedelta, timezone
-
-# Replace both occurrences:
-expire = datetime.now(timezone.utc) + expires_delta
-expire = datetime.now(timezone.utc) + timedelta(minutes=15)
-```
-
-### 6.6 Fix MED-1: Standardized Error Response
+### 6.6 Fix MED-1: Standardized Error Response — ⏳ Sprint 2
 
 ```python
 # src/core/errors.py  (new module)
@@ -411,7 +335,7 @@ def error_response(status_code: int, code: str, message: str, detail: str | None
 
 Register a global `HTTPException` handler in `main.py` that converts `detail` strings to this format.
 
-### 6.7 Fix MED-4: Private API Cache Replacement
+### 6.7 Fix MED-4: Private API Cache Replacement — ⏳ Sprint 2
 
 ```python
 # src/core/factory/orm_factory.py
@@ -430,16 +354,16 @@ def create_orm_model(schema: ModelSchema, Base: type[DeclarativeBase]) -> type:
 
 ## 7. Sprint Plan Summary
 
-**Sprint 1 (2026-05-08 onward)** targets all CRITICAL and HIGH issues:
+**Sprint 1 (2026-05-08)** — ✅ COMPLETE — targeted all CRITICAL and HIGH issues:
 
-| Priority | Task | File | Issue |
-|---|---|---|---|
-| P0 | Load SECRET_KEY from env | `auth.py` | CRIT-1 |
-| P0 | Replace `exec()` with closure factory | `router_builder.py` | CRIT-2 |
-| P1 | Generic PK resolution in CRUDBase | `repository.py` | HIGH-1 |
-| P1 | Add PATCH endpoint | `router_builder.py` | HIGH-2 |
-| P1 | Fix `datetime.utcnow()` | `auth.py` | HIGH-3 |
-| P1 | Update docs to say YAML (not JSON) | `CLAUDE.md`, `README.md` | HIGH-4 |
+| Priority | Task | File | Issue | Status |
+|---|---|---|---|---|
+| P0 | Load SECRET_KEY from env | `auth.py` | CRIT-1 | ✅ Done |
+| P0 | Replace `exec()` with closure factory | `router_builder.py` | CRIT-2 | ✅ Done |
+| P1 | Generic PK resolution in CRUDBase | `repository.py` | HIGH-1 | ✅ Done |
+| P1 | Add PATCH endpoint | `router_builder.py` | HIGH-2 | ✅ Done |
+| P1 | Fix `datetime.utcnow()` | `auth.py` | HIGH-3 | ✅ Done |
+| P1 | Update docs to say YAML (not JSON) | `CLAUDE.md`, `README.md` | HIGH-4 | ✅ Done |
 
 **Sprint 2** targets MEDIUM issues:
 - Standardized error response format (MED-1)
