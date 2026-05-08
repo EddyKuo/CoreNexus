@@ -167,12 +167,18 @@ pip install fastapi sqlalchemy alembic pydantic asyncpg uvicorn python-dotenv
 cp .env.example .env
 ```
 
-編輯 `.env`，填入你的 PostgreSQL 連線資訊：
+產生 JWT 簽名金鑰（**必填**，缺少時服務拒絕啟動）：
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+# 將輸出的字串填入 .env 的 SECRET_KEY=
+```
+
+編輯 `.env`，填入 PostgreSQL 連線資訊與 SECRET_KEY：
 
 ```env
-DATABASE_URL=postgresql+asyncpg://帳號:密碼@localhost:5432/資料庫名稱
+SECRET_KEY=你剛才產生的隨機字串
 
-# 範例（本機 PostgreSQL）
 DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/corenexus
 ```
 
@@ -774,15 +780,14 @@ GET /api/v1/products?sort=price&order=asc
 
 ## 實作進度
 
-> 目前專案處於規劃/文件階段，以下為各 Phase 的實作進度追蹤：
-
 | Phase | 內容 | 狀態 |
 |---|---|---|
-| Phase 1 | Schema 定義、ORM Factory、DTO Factory | 未開始 |
-| Phase 2 | Generic Repository、Router Builder、Lifespan 啟動 | 未開始 |
-| Phase 3 | Alembic 整合、Safe-Mode 遷移 CLI | 未開始 |
-| Phase 4 | 魔法查詢過濾器、分頁、Auth 擴展點 | 未開始 |
-| Phase 5 | 連線池優化、全域錯誤處理、Docker 化 | 未開始 |
+| Phase 1 | Schema 定義、ORM Factory、DTO Factory | ✅ 完成 |
+| Phase 2 | Generic Repository、Router Builder、Lifespan 啟動 | ✅ 完成 |
+| Phase 3 | Alembic 整合、Safe-Mode 遷移 CLI | ✅ 完成 |
+| Phase 4 | 魔法查詢過濾器、分頁、Auth 擴展點 | ✅ 完成 |
+| Phase 5 | 連線池優化、全域錯誤處理、Docker 化 | ✅ 完成 |
+| Sprint 1 | 安全性強化（SECRET_KEY env、移除 exec()、通用 PK、PATCH 端點） | 🔄 進行中 |
 
 詳細的實作任務清單請參考 [plan.md](plan.md)。
 

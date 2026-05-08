@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from typing import Any, Generic, Type, TypeVar
+from uuid import UUID
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, inspect as sa_inspect
+from sqlalchemy import Uuid as SAUuid
 from sqlalchemy.ext.asyncio import AsyncSession
+
+try:
+    from sqlalchemy.dialects.postgresql import UUID as PGUUID
+    _UUID_TYPES = (SAUuid, PGUUID)
+except ImportError:
+    _UUID_TYPES = (SAUuid,)  # type: ignore[assignment]
 
 ModelType = TypeVar("ModelType")
 CreateSchemaType = TypeVar("CreateSchemaType")
@@ -13,19 +21,25 @@ UpdateSchemaType = TypeVar("UpdateSchemaType")
 class CRUDBase(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
     def __init__(self, model: Type[ModelType]) -> None:
         self.model = model
+        mapper = sa_inspect(model)
+        pk_cols = list(mapper.mapper.primary_key)
+        if len(pk_cols) != 1:
+            raise ValueError(
+                f"CRUDBase requires a single-column primary key; "
+                f"{model.__name__} has {len(pk_cols)}: {[c.name for c in pk_cols]}"
+            )
+        self._pk_col = pk_cols[0]
+        self._pk_attr = getattr(model, self._pk_col.name)
+        self._pk_is_uuid = isinstance(self._pk_col.type, _UUID_TYPES)
 
     async def get(self, db: AsyncSession, id: Any) -> ModelType | None:
-        # Some UUID columns (like in SQLite testing) strictly require UUID objects
-        try:
-            from uuid import UUID
-            if isinstance(id, str) and len(id) == 36:
+        id_val = id
+        if self._pk_is_uuid and isinstance(id, str):
+            try:
                 id_val = UUID(id)
-            else:
-                id_val = id
-        except ValueError:
-            id_val = id
-            
-        result = await db.execute(select(self.model).where(self.model.id == id_val))
+            except ValueError:
+                return None
+        result = await db.execute(select(self.model).where(self._pk_attr == id_val))
         return result.scalar_one_or_none()
 
     async def get_multi(

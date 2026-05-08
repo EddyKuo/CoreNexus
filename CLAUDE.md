@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-CoreNexus is a **Meta-System Code Generation Engine** — a SSOT (Single Source of Truth) infrastructure that reads JSON Schema Blueprints at startup and automatically generates:
+CoreNexus is a **Meta-System Code Generation Engine** — a SSOT (Single Source of Truth) infrastructure that reads YAML Blueprints at startup and automatically generates:
 - SQLAlchemy ORM models (via Python `type()` metaclass)
 - Pydantic DTOs (via `pydantic.create_model`) for Create/Update/Response
 - FastAPI CRUD routes (via dynamic `APIRouter`)
 - Alembic migration scripts (with Safe-Mode destructive-op detection)
 
-**Current status**: Documentation/planning phase only. No source code exists yet. All `plan.md` tasks are unimplemented.
+**Current status**: All Phase 1–5 core features implemented. Sprint 1 security & correctness hardening in progress (see `.claude/sprint/current/plan.md`).
 
 ## Technology Stack
 
@@ -32,14 +32,14 @@ src/
 │   ├── factory/
 │   │   ├── orm_factory.py       # type() dynamic SQLAlchemy model generation
 │   │   └── dto_factory.py       # pydantic.create_model dynamic DTO generation
-│   ├── parser.py                # Load & validate blueprints/*.json
+│   ├── parser.py                # Load & validate blueprints/*.yaml
 │   ├── repository.py            # Generic async CRUD (AsyncSession)
 │   ├── router_builder.py        # Bind ORM+DTOs+Repository into APIRouter
 │   └── utils/query_builder.py   # Magic filter protocol (?field__gte=val)
 ├── database.py                  # create_async_engine + AsyncSession factory
 └── main.py                      # FastAPI app with lifespan (load blueprints → mount routes)
 
-blueprints/                      # JSON schema definitions (source of truth)
+blueprints/                      # YAML blueprint definitions (source of truth)
 alembic/                         # env.py modified to load dynamic Base.metadata
 cli.py                           # Auto-migration CLI (wraps alembic commands + Safe-Mode)
 ```
@@ -47,7 +47,7 @@ cli.py                           # Auto-migration CLI (wraps alembic commands + 
 ## Architecture: Data Flow
 
 ```
-blueprints/*.json
+blueprints/*.yaml
     → parser.py (validate with Pydantic meta-schema)
     → orm_factory.py (generate SQLAlchemy Model classes)
     → dto_factory.py (generate Create/Update/Response Pydantic models)

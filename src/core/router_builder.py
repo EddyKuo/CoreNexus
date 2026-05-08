@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Annotated
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -21,6 +21,57 @@ class PaginatedResponse(BaseModel):
     data: list[Any]
 
 
+def _make_create_handler(
+    CreateDTO: type[BaseModel],
+    get_db: Any,
+    crud: CRUDBase,
+) -> Any:
+    """Return a POST handler whose `item` parameter is annotated with CreateDTO.
+
+    FastAPI reads __annotations__ at route-registration time; mutating them after
+    defining the closure injects the runtime-generated DTO without exec().
+    """
+    async def _create(item: BaseModel, db: AsyncSession = Depends(get_db)):
+        return await crud.create(db=db, obj_in=item)
+
+    _create.__annotations__["item"] = CreateDTO
+    return _create
+
+
+def _make_update_handler(
+    UpdateDTO: type[BaseModel],
+    get_db: Any,
+    crud: CRUDBase,
+    model_name: str,
+) -> Any:
+    async def _update(id: str, item: BaseModel, db: AsyncSession = Depends(get_db)):
+        db_obj = await crud.get(db=db, id=id)
+        if db_obj is None:
+            raise HTTPException(status_code=404, detail=f"{model_name} not found")
+        return await crud.update(db=db, db_obj=db_obj, obj_in=item)
+
+    _update.__annotations__["item"] = UpdateDTO
+    return _update
+
+
+def _make_patch_handler(
+    UpdateDTO: type[BaseModel],
+    get_db: Any,
+    crud: CRUDBase,
+    model_name: str,
+) -> Any:
+    # UpdateDTO already marks every field Optional with default=None,
+    # and CRUDBase.update() uses exclude_unset=True, so PATCH semantics are automatic.
+    async def _patch(id: str, item: BaseModel, db: AsyncSession = Depends(get_db)):
+        db_obj = await crud.get(db=db, id=id)
+        if db_obj is None:
+            raise HTTPException(status_code=404, detail=f"{model_name} not found")
+        return await crud.update(db=db, db_obj=db_obj, obj_in=item)
+
+    _patch.__annotations__["item"] = UpdateDTO
+    return _patch
+
+
 def create_crud_router(
     schema: ModelSchema,
     orm_model: type,
@@ -38,25 +89,9 @@ def create_crud_router(
     dependencies = [Depends(verify_token)] if schema.auth_required else []
 
     # ── POST / ──────────────────────────────────────────────
-    # Build the handler with a correctly-typed `item` parameter at definition
-    # time so FastAPI can inspect it properly.
-    exec(
-        f"""
-async def _create(item: __CreateDTO, db: AsyncSession = Depends(__get_db)):
-    return await __crud.create(db=db, obj_in=item)
-""",
-        {
-            "__CreateDTO": CreateDTO,
-            "AsyncSession": AsyncSession,
-            "Depends": Depends,
-            "__get_db": get_db,
-            "__crud": crud,
-        },
-        _ns := {},
-    )
     router.add_api_route(
         "/",
-        _ns["_create"],
+        _make_create_handler(CreateDTO, get_db, crud),
         methods=["POST"],
         response_model=ResponseDTO,
         status_code=201,
@@ -107,32 +142,23 @@ async def _create(item: __CreateDTO, db: AsyncSession = Depends(__get_db)):
         return db_obj
 
     # ── PUT /{id} ────────────────────────────────────────────
-    exec(
-        f"""
-async def _update(id: str, item: __UpdateDTO, db: AsyncSession = Depends(__get_db)):
-    db_obj = await __crud.get(db=db, id=id)
-    if db_obj is None:
-        raise __HTTPException(status_code=404, detail=__detail)
-    return await __crud.update(db=db, db_obj=db_obj, obj_in=item)
-""",
-        {
-            "__UpdateDTO": UpdateDTO,
-            "AsyncSession": AsyncSession,
-            "Depends": Depends,
-            "__get_db": get_db,
-            "__crud": crud,
-            "__HTTPException": HTTPException,
-            "__detail": f"{schema.model_name} not found",
-        },
-        _ns2 := {},
-    )
     router.add_api_route(
         "/{id}",
-        _ns2["_update"],
+        _make_update_handler(UpdateDTO, get_db, crud, schema.model_name),
         methods=["PUT"],
         response_model=ResponseDTO,
         dependencies=dependencies,
         summary=f"Update a {schema.model_name}",
+    )
+
+    # ── PATCH /{id} ──────────────────────────────────────────
+    router.add_api_route(
+        "/{id}",
+        _make_patch_handler(UpdateDTO, get_db, crud, schema.model_name),
+        methods=["PATCH"],
+        response_model=ResponseDTO,
+        dependencies=dependencies,
+        summary=f"Partially update a {schema.model_name}",
     )
 
     # ── DELETE /{id} ─────────────────────────────────────────
