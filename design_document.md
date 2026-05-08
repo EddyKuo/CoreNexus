@@ -78,18 +78,18 @@ flowchart TD
 
     subgraph Request["Request Path"]
         CLIENT[HTTP Client] --> APP
-        APP -->|Depends(get_db)| SESS[AsyncSession]
-        APP -->|auth_required=true| AUTH[auth.py — JWT verify]
-        APP --> REPO[CRUDBase — repository.py]
+        APP -->|"Depends(get_db)"| SESS[AsyncSession]
+        APP -->|"auth_required=true"| AUTH["auth.py — JWT verify"]
+        APP --> REPO["CRUDBase — repository.py"]
         REPO --> SESS
         SESS --> DB
     end
 
     subgraph CLI["Migration CLI (cli.py)"]
-        TYPER[Typer CLI] --> ALEMBIC[alembic revision --autogenerate]
+        TYPER[Typer CLI] --> ALEMBIC["alembic revision --autogenerate"]
         ALEMBIC --> SAFE[Safe-Mode scanner]
-        SAFE -->|no destructive ops| APPLY[alembic upgrade head]
-        SAFE -->|drop_table/drop_column| BLOCK[SystemExit 1]
+        SAFE -->|"no destructive ops"| APPLY[alembic upgrade head]
+        SAFE -->|"drop_table/drop_column"| BLOCK[SystemExit 1]
     end
 
     subgraph QFilter["Query Filter (query_builder.py)"]
